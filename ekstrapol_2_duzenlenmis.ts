@@ -27,9 +27,18 @@ export class MovementEngine {
     private Guncel_Gorsel_Konum = new Cesium.Cartesian3();
     private Guncel_Gorsel_Yonelim = new Cesium.Quaternion();
 
-    // --- HİBRİT ZAMAN YÖNETİMİ MİMARİSİ (Live + Replay & Timer) ---
-    private Son_Sunucu_Zamani: number = 0; // Paketten gelen son_sunucu_saati_sn (Fiziğin Saati)
-    private Son_Paket_Yerel_Zamanı: number = 0; // performance.now() milisaniyesi (Ağın Ritmi ve Kronometre)
+    // --- HİBRİT ZAMAN YÖNETİMİ MİMARİSİ ---
+    // Sunucu zamanı (saniye cinsinden float). Fiziğin Saati.
+    private Son_Sunucu_Zamani: number = 0;
+
+    // Sunucu zamanını yerel saate çevirmek için offset:
+    // performance.now()/1000 ile sunucu_saati_sn arasındaki fark.
+    // estimatedServerNow = performance.now()/1000 - Sunucu_Zaman_Farki
+    // Bu, orijinal koddaki Date.now() - offset yaklaşımının aynısıdır.
+    private Sunucu_Zaman_Farki: number = 0;
+
+    // Ağın ritmi ve sönümleme için ayrı yerel kronometre
+    private Son_Paket_Yerel_Zamanı: number = 0; // performance.now() ms
     private Ortalama_Paket_Suresi: number = 0.2; // Ağın ortalama paket süresi (Varsayılan 200ms)
 
     private Konum_Hatasi = new Cesium.Cartesian3(); // Hedef ile Görsel arasındaki Konum Hatası
@@ -50,6 +59,7 @@ export class MovementEngine {
     private static readonly _sTrackDiff = new Cesium.Cartesian3(); 
     private static readonly _sTrackEnu = new Cesium.Cartesian3();  
     private static readonly _sNewPos = new Cesium.Cartesian3();    
+    private static readonly _sNewPosValid = new Cesium.Cartesian3();
     private static readonly _sInvNewQuat = new Cesium.Quaternion();
     private static readonly _sDecayedOriError = new Cesium.Quaternion();
     
@@ -71,7 +81,6 @@ export class MovementEngine {
         this.Rota_Acisi = initialH;
         this.Son_Rota_Acisi = initialH;
 
-        // Kronometreyi yüksek hassasiyetle başlat
         this.Son_Paket_Yerel_Zamanı = performance.now();
         
         Cesium.Cartesian3.ZERO.clone(this.Konum_Hatasi);
@@ -80,7 +89,7 @@ export class MovementEngine {
 
     /**
      * Sunucudan yeni paket geldiğinde çalışır.
-     * @param son_sunucu_saati_sn : Simülasyon zamanı saniye cinsinden (Örn: 2345.34) 
+     * @param son_sunucu_saati_str : Simülasyon zamanı saniye cinsinden string (Örn: "2345.34") 
      */
     public onPacketReceived(lon: number, lat: number, alt: number, yatay_Hiz: number, h: number, p: number, r: number, son_sunucu_saati_str: string) {
 
@@ -95,19 +104,27 @@ export class MovementEngine {
 
         //  KAYIT DURAKLATILDI veya aynı paket tekrar tekrar geliyor
         if (son_sunucu_saati_sn === this.Son_Sunucu_Zamani) {
-            // Kayıt durduğu için sunucu aynı paketi atıyor.
-            // Kronometreyi sıfırlıyoruz ki uçağın ekstrapolasyonu 0 olsun ve kilitlensin.
-            // Bu sıfırlama, uçağın haksız yere "Ağ Koptu (Timeout)" zannetmesini de engeller.  
+            // Sunucu saati değişmedi → offset'e dokunma!
+            // Sadece yerel kronometreyi sıfırla (timeout engeli + sönümleme dt sıfırlama).
+            // Ekstrapolasyon: estimatedServerNow doğal olarak ilerlemeye devam eder,
+            // uçak son bilinen hızıyla pürüzsüzce ilerler, 3sn sonra otomatik durur.
             this.Son_Paket_Yerel_Zamanı = localNow; 
             return; 
         }
 
-        const test_pos = Cesium.Cartesian3.fromDegrees(lon,lat,alt, Ellipsoid.WGS84, MovementEngine._sNewPosValid);
+        const test_pos = Cesium.Cartesian3.fromDegrees(lon, lat, alt, Cesium.Ellipsoid.WGS84, MovementEngine._sNewPosValid);
         // konum aynıysa h p r nin degismesi bi şey ifade etmez uçak konum değişmeden h p r sini değiştiremez
         if (test_pos.equals(this.Son_Gercek_Konum) ) /* && 
             h === this.Son_Pruva_Acisi && 
             p === this.Yunuslama_Acisi && 
             r === this.Yatis_Acisi)*/ {
+            // Sunucu saati gerçekten ilerledi → offset'i EMA ile güncelle (hard-set jitter yapar)
+            const currentOffset = (localNow / 1000.0) - son_sunucu_saati_sn;
+            if (this.Sunucu_Zaman_Farki === 0) {
+                this.Sunucu_Zaman_Farki = currentOffset;
+            } else {
+                this.Sunucu_Zaman_Farki = this.Sunucu_Zaman_Farki * 0.9 + currentOffset * 0.1;
+            }
             this.Son_Sunucu_Zamani = son_sunucu_saati_sn;
             this.Son_Paket_Yerel_Zamanı = localNow;
             return;
@@ -118,12 +135,13 @@ export class MovementEngine {
         if (this.Son_Sunucu_Zamani === 0 || (son_sunucu_saati_sn < this.Son_Sunucu_Zamani)) {
             this.Son_Sunucu_Zamani = son_sunucu_saati_sn;
             this.Son_Paket_Yerel_Zamanı = localNow;
+            this.Sunucu_Zaman_Farki = (localNow / 1000.0) - son_sunucu_saati_sn;
             this.forceSync(lon, lat, alt, yatay_Hiz, h, p, r);
             return;
         }
 
 
-        // --- 5. AĞIN RİTMİ (dtLocal) - Lag ve Ping Tespiti ---
+        // --- AĞIN RİTMİ (dtLocal) - Lag ve Ping Tespiti ---
         let dtLocal = 0;
         if (this.Paket_Sayisi > 0) {
             dtLocal = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
@@ -132,16 +150,26 @@ export class MovementEngine {
             this.Ortalama_Paket_Suresi = (this.Ortalama_Paket_Suresi * 0.8) + (clampedDt * 0.2);
         }
 
-        // --- 6. FİZİKSEL ZAMAN (dtPacket) ---
+        // --- FİZİKSEL ZAMAN (dtPacket) ---
         // Uçağın ivmesini hesaplarken lagları değil, orijinal fiziksel üretim zamanını kullanırız
         const dtPacket = son_sunucu_saati_sn - this.Son_Sunucu_Zamani;
+
+        // --- SAAT SENKRONİZASYONU (Orijinal mimarinin karşılığı) ---
+        // Sunucu zamanını yerel saate eşlemek için offset hesapla:
+        // estimatedServerNow = performance.now()/1000 - offset  →  ≈ sunucu saati
+        const currentOffset = (localNow / 1000.0) - son_sunucu_saati_sn;
+        if (this.Sunucu_Zaman_Farki === 0) {
+            this.Sunucu_Zaman_Farki = currentOffset;
+        } else {
+            // EMA ile yumuşat (jitter'ı emer, drift'i takip eder)
+            this.Sunucu_Zaman_Farki = this.Sunucu_Zaman_Farki * 0.9 + currentOffset * 0.1;
+        }
 
         // Kronometreleri ve zamanı güncelle
         this.Son_Sunucu_Zamani = son_sunucu_saati_sn;
         this.Son_Paket_Yerel_Zamanı = localNow; 
 
-        // 7. ZAMAN AŞIMI (Timeout) ve HAFIZA TEMİZLİĞİ
-        // Zaman aşımını gerçek geçen süreye (dtLocal) göre kontrol ediyoruz
+        // ZAMAN AŞIMI (Timeout) ve HAFIZA TEMİZLİĞİ
         if (dtPacket > this.MAKS_TAHMIN_SURESI) {
             console.log(`[MovementEngine] ${dtLocal.toFixed(1)}s LAG -> Bağlantı koptu/gecikti, ForceSync yapılıyor.`);
             this.forceSync(lon, lat, alt, yatay_Hiz, h, p, r);
@@ -232,7 +260,6 @@ export class MovementEngine {
             } else {
                 this.Rota_Donus_Hizi = (this.Rota_Donus_Hizi * 0.8) + (rawTrackTurnRate * 0.2);
                 this.Dikey_Hiz = (this.Dikey_Hiz * 0.8) + (rawDikeyHiz * 0.2);
-                // Kontrol Yüzeyleri: EMA iptal değil önceki versiyonda da bu hali daha iyiydi
                 this.Pruva_Donus_Hizi = (this.Pruva_Donus_Hizi * 0.8) + (rawTurnRate * 0.2); 
                 this.Yunuslama_Hizi = (this.Yunuslama_Hizi * 0.8) + (rawPitchRate * 0.2);
                 this.Yatis_Hizi = (this.Yatis_Hizi * 0.8) + (rawRollRate * 0.2);
@@ -284,6 +311,12 @@ export class MovementEngine {
         Cesium.Cartesian3.clone(newPos, this.Son_Gercek_Konum);
     }
 
+    /**
+     * Her render frame'inde çağrılır.
+     * Ekstrapolasyon: Sunucu saati offset'i ile (estimatedServerNow - lastServerTime)
+     * Sönümleme: Yerel kronometre ile (performance.now() - lastPacketLocalTime)
+     * Bu iki bağımsız saat orijinal kodun titremesiz çalışmasını sağlayan mimaridir.
+     */
     public Guncel_Konumu_Getir(result: Cesium.Cartesian3): Cesium.Cartesian3 {
         if((this.Son_Gercek_Konum.x===0 && this.Son_Gercek_Konum.y===0 && this.Son_Gercek_Konum.z===0) 
             || !Number.isFinite(this.Son_Gercek_Konum.x) || !Number.isFinite(this.Son_Gercek_Konum.y) || !Number.isFinite(this.Son_Gercek_Konum.z))
@@ -291,43 +324,43 @@ export class MovementEngine {
             return Cesium.Cartesian3.clone(this.Son_Gercek_Konum , this.Guncel_Gorsel_Konum);
         }
 
-        // KRONOMETRE ZAMANI (performance.now ile yüksek hassasiyetli)
         const localNow = performance.now();
-        let dtSincePacket_raw = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
-        
-        if (dtSincePacket_raw < 0) dtSincePacket_raw = 0;
-        if (dtSincePacket_raw > this.MAKS_TAHMIN_SURESI){
-            // Veri gelmiyor veya oyun duraklatılmış, tahmin yapmayı bırak ve modeli kilitle
-            return Cesium.Cartesian3.clone(this.Guncel_Gorsel_Konum ,result);
-        }
 
-        // EKSTRAPOLASYON dt'si: Bir paket süresi ile sınırla (overshoot önleme)
-        // Sönümleme (blending) dt'si ise ham kronometreyi kullanır
-        const dtExtrap = Math.min(dtSincePacket_raw, this.Ortalama_Paket_Suresi);
-        const dtBlend = dtSincePacket_raw;
+        // --- EKSTRAPOLASYON dt: Sunucu saati offset'i ile ---
+        // estimatedServerNow ≈ sunucunun "şu anki" saati (sn cinsinden float)
+        const estimatedServerNow = (localNow / 1000.0) - this.Sunucu_Zaman_Farki;
+        let dtSincePacket = estimatedServerNow - this.Son_Sunucu_Zamani;
+
+        if (dtSincePacket < 0) dtSincePacket = 0;
+        if (dtSincePacket > this.MAKS_TAHMIN_SURESI){
+            return Cesium.Cartesian3.clone(this.Guncel_Gorsel_Konum ,result);
+        } 
+
+        // --- SÖNÜMLEME dt: Yerel kronometre ile (bağımsız) ---
+        const timeSinceLastUpdate = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
 
         // 1. EKSTRAPOLASYON (Kusursuz Hayalet Hedefi Hesapla)
         const targetPos = Cesium.Cartesian3.clone(this.Son_Gercek_Konum, MovementEngine._sTargetPos);
 
-        if (dtExtrap > 0 && this.Yatay_Hiz > 1.0 && this.Paket_Sayisi >= 2) {
+        if (dtSincePacket > 0 && this.Yatay_Hiz > 1.0 && this.Paket_Sayisi >= 2) {
             const moveEnu = MovementEngine._sMoveEnu;
             
             // Eğer dönüş hızı çok küçükse (düz uçuş), sıfıra bölme hatasını önlemek için lineer (kiriş) yaklaşım
             if (Math.abs(this.Rota_Donus_Hizi) < 0.001) {
-                const predictedTrack = this.Rota_Acisi + (this.Rota_Donus_Hizi * dtExtrap);
-                moveEnu.x = Math.sin(predictedTrack) * this.Yatay_Hiz * dtExtrap; // Doğu ekseni
-                moveEnu.y = Math.cos(predictedTrack) * this.Yatay_Hiz * dtExtrap; // Kuzey ekseni
+                const predictedTrack = this.Rota_Acisi + (this.Rota_Donus_Hizi * dtSincePacket);
+                moveEnu.x = Math.sin(predictedTrack) * this.Yatay_Hiz * dtSincePacket; // Doğu ekseni
+                moveEnu.y = Math.cos(predictedTrack) * this.Yatay_Hiz * dtSincePacket; // Kuzey ekseni
             } else {
                 // Uçak virajdaysa CTRV (Yay İntegrali) kavis modeli
                 const theta0 = this.Rota_Acisi;
-                const theta1 = theta0 + (this.Rota_Donus_Hizi * dtExtrap);
+                const theta1 = theta0 + (this.Rota_Donus_Hizi * dtSincePacket);
                 const R = this.Yatay_Hiz / this.Rota_Donus_Hizi; 
 
                 moveEnu.x = R * (Math.cos(theta0) - Math.cos(theta1)); 
                 moveEnu.y = R * (Math.sin(theta1) - Math.sin(theta0)); 
             }
 
-            moveEnu.z = this.Dikey_Hiz * dtExtrap;
+            moveEnu.z = this.Dikey_Hiz * dtSincePacket;
 
             Cesium.Transforms.eastNorthUpToFixedFrame(this.Son_Gercek_Konum, Cesium.Ellipsoid.WGS84, MovementEngine._sEnuMatrix);
             Cesium.Matrix4.multiplyByPointAsVector(MovementEngine._sEnuMatrix, moveEnu, MovementEngine._sMoveEcef);
@@ -335,6 +368,7 @@ export class MovementEngine {
         }
 
         // 2. SÖNÜMLEME (Hata Yayını Eritme - Error Blending)
+        // timeSinceLastUpdate kullanılır (yerel kronometre — ekstrapolasyondan bağımsız)
         const pozisyon_hatasi_buyukluk = Cesium.Cartesian3.magnitude(this.Konum_Hatasi);
         let sonumleme_carpani = 3.0; 
         
@@ -349,7 +383,7 @@ export class MovementEngine {
         
         const safeBlendDuration = this.Ortalama_Paket_Suresi; 
         const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration; 
-        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * dtBlend);
+        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * timeSinceLastUpdate);
         
         if(Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
 
@@ -367,18 +401,20 @@ export class MovementEngine {
         }
 
         const localNow = performance.now();
-        let dtSincePacket_raw = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
-        if (dtSincePacket_raw < 0) dtSincePacket_raw = 0;
-        if (dtSincePacket_raw > this.MAKS_TAHMIN_SURESI) dtSincePacket_raw = this.MAKS_TAHMIN_SURESI;
 
-        // Ekstrapolasyon dt'si sınırlı, sönümleme dt'si ham
-        const dtExtrap = Math.min(dtSincePacket_raw, this.Ortalama_Paket_Suresi);
-        const dtBlend = dtSincePacket_raw;
+        // --- EKSTRAPOLASYON dt: Sunucu saati offset'i ile ---
+        const estimatedServerNow = (localNow / 1000.0) - this.Sunucu_Zaman_Farki;
+        let dtSincePacket = estimatedServerNow - this.Son_Sunucu_Zamani;
+        if (dtSincePacket < 0) dtSincePacket = 0;
+        if (dtSincePacket > this.MAKS_TAHMIN_SURESI) dtSincePacket = this.MAKS_TAHMIN_SURESI;
+
+        // --- SÖNÜMLEME dt: Yerel kronometre ile (bağımsız) ---
+        const timeSinceLastUpdate = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
 
         // Açıların Ekstrapolasyonu (HPR'ı geleceğe doğru bük)
-        const predictedHeading = this.Son_Pruva_Acisi + (this.Pruva_Donus_Hizi * dtExtrap);
-        const predictedPitch = this.Yunuslama_Acisi + (this.Yunuslama_Hizi * dtExtrap);
-        const predictedRoll = this.Yatis_Acisi + (this.Yatis_Hizi * dtExtrap);
+        const predictedHeading = this.Son_Pruva_Acisi + (this.Pruva_Donus_Hizi * dtSincePacket);
+        const predictedPitch = this.Yunuslama_Acisi + (this.Yunuslama_Hizi * dtSincePacket);
+        const predictedRoll = this.Yatis_Acisi + (this.Yatis_Hizi * dtSincePacket);
 
         MovementEngine._sHpr.heading = predictedHeading;
         MovementEngine._sHpr.pitch = predictedPitch;
@@ -391,6 +427,7 @@ export class MovementEngine {
         );
 
         // Açısal Hatanın Sönümlenmesi (SLERP)
+        // timeSinceLastUpdate kullanılır (yerel kronometre — ekstrapolasyondan bağımsız)
         const oryatasyon_hatasi_buyukluk = Cesium.Cartesian3.magnitude(this.Yonelim_Hatasi);
         let sonumleme_carpani = 3.0; 
         if(this.Yatay_Hiz < 5.0){
@@ -403,7 +440,7 @@ export class MovementEngine {
         
         const safeBlendDuration = Math.max(this.Ortalama_Paket_Suresi, 0.2); 
         const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration; 
-        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * dtBlend);
+        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * timeSinceLastUpdate);
         if(Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
 
         // IDENTITY (Sıfır hata) durumuna doğru küresel yumuşatma
