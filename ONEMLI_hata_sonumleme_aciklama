@@ -1,0 +1,209 @@
+# Hata Sönümleme (Error Blending) Nasıl Çalışır?
+
+## Formülü Tekrar Yazalım
+
+Her render frame'inde hesaplanan görsel konum şu:
+
+```
+Görsel_Konum = targetPos + Konum_Hatasi × Sönümleme_Katsayısı
+               ─────────   ─────────────   ─────────────────── 
+               Ekstrapolasyon   SABİT vektör    1.0 → 0.0 üstel düşüş
+               (ileriye gider)  (donmuş, değişmez)  (zamanla küçülür)
+```
+
+Senin kafanı karıştıran nokta şu: **"Hata sabit bir vektör olarak kaydediliyor, peki nasıl eriyor?"**
+
+Cevap: **Hata vektörünün kendisi değişmiyor. Onu çarpan katsayı (0→1 arası) zamanla sıfıra düşüyor.**
+
+Yani:
+- `Konum_Hatasi = (0, 0.2, 0)` → **bu hiç değişmez** (sonraki pakete kadar)
+- `Sönümleme_Katsayısı` → **her frame'de küçülür**: 1.0 → 0.86 → 0.74 → ... → 0.05
+
+---
+
+## Somut Sayısal Örnek
+
+**Senaryo:** Uçak kuzeye 50 m/s gidiyor. Paketler 200ms arayla geliyor.
+Sadece Kuzey (Y) eksenini takip edelim. Sönümleme oranı: `decay = 15/s`
+
+---
+
+### Paket 1 Gelir (t=0ms)
+
+```
+Sunucudan gelen gerçek konum:  Y = 0 m
+İlk paket → Görsel direkt buraya ışınlanır.
+Hata = 0
+Son_Gercek_Konum = 0
+```
+
+### t=0 → t=200ms arası (Paket yok, sadece ekstrapolasyon)
+
+```
+t=  0ms:  targetPos = 0 + 50×0.00 =  0.0m   →  Görsel =  0.0m
+t= 50ms:  targetPos = 0 + 50×0.05 =  2.5m   →  Görsel =  2.5m
+t=100ms:  targetPos = 0 + 50×0.10 =  5.0m   →  Görsel =  5.0m
+t=150ms:  targetPos = 0 + 50×0.15 =  7.5m   →  Görsel =  7.5m
+t=200ms:  targetPos = 0 + 50×0.20 = 10.0m   →  Görsel = 10.0m  ◄── Şu an burada
+```
+
+Hata=0 olduğu için `targetPos + 0 × herhangi = targetPos`. Dümdüz ilerliyor.
+
+---
+
+### Paket 2 Gelir (t=200ms)
+
+```
+Sunucudan gelen GERÇEK konum:  Y = 9.8 m   (bizim tahminimiz 10.0'dı!)
+Görsel modelin şu anki konumu: Y = 10.0 m
+
+→ Hata yakalanır: Konum_Hatasi = 10.0 - 9.8 = +0.2 m  (0.2m İLERİDEYİZ)
+→ Son_Gercek_Konum = 9.8 m  (yeni ekstrapolasyon BAZI)
+→ Son_Paket_Yerel_Zamanı = şimdi  (sönümleme kronometresi sıfırlanır)
+```
+
+> [!IMPORTANT]
+> Dikkat: **Görsel konuma DOKUNULMADI!** Hala 10.0m'de duruyor.
+> Sadece "hata = 0.2m" kaydedildi ve yeni baz = 9.8m olarak güncellendi.
+
+---
+
+### t=200ms — Paket 2'den HEMEN SONRA ilk render frame
+
+```
+timeSinceLastUpdate = 0 saniye  (paket az önce geldi)
+dtSincePacket ≈ 0 saniye
+
+targetPos = 9.8 + 50×0 = 9.8 m      ← Ekstrapolasyon (yeni bazdan)
+Katsayı  = e^(-15 × 0) = e^0 = 1.0  ← Sönümleme (henüz hiç zaman geçmedi)
+
+Görsel = 9.8 + 0.2 × 1.0 = 10.0 m   ← AYNI YER! Sıçrama yok!
+         ───   ─────────
+         yeni   eriyen
+         baz    hata
+```
+
+> [!TIP]
+> **İşte sihir burada!** Paket geldiğinde:
+> - `targetPos` geriye sıçradı (10.0 → 9.8) 
+> - Ama `hata × 1.0 = +0.2` bunu tam olarak telafi etti
+> - Sonuç: `9.8 + 0.2 = 10.0` → Görsel hiç kıpırdamadı! **Sıfır sıçrama!**
+
+---
+
+### t=200ms → t=400ms arası (Hata eriyor)
+
+Şimdi her render frame'inde neler oluyor, adım adım:
+
+```
+Zaman   │ dtSince │ targetPos        │ Katsayı           │ Hata×Katsayı │ GÖRSEL
+(ms)    │ Packet  │ 9.8 + 50×dt      │ e^(-15×tSince)    │ 0.2 × k      │ target+hata
+────────┼─────────┼──────────────────┼───────────────────┼──────────────┼──────────
+200     │  0.00   │  9.8+0.0 = 9.80  │ e^(0)    = 1.000  │ 0.200        │ 10.000
+210     │  0.01   │  9.8+0.5 = 10.30 │ e^(-0.15)= 0.861  │ 0.172        │ 10.472
+220     │  0.02   │  9.8+1.0 = 10.80 │ e^(-0.30)= 0.741  │ 0.148        │ 10.948
+240     │  0.04   │  9.8+2.0 = 11.80 │ e^(-0.60)= 0.549  │ 0.110        │ 11.910
+260     │  0.06   │  9.8+3.0 = 12.80 │ e^(-0.90)= 0.407  │ 0.081        │ 12.881
+300     │  0.10   │  9.8+5.0 = 14.80 │ e^(-1.50)= 0.223  │ 0.045        │ 14.845
+350     │  0.15   │  9.8+7.5 = 17.30 │ e^(-2.25)= 0.105  │ 0.021        │ 17.321
+400     │  0.20   │  9.8+10  = 19.80 │ e^(-3.00)= 0.050  │ 0.010        │ 19.810
+────────┴─────────┴──────────────────┴───────────────────┴──────────────┴──────────
+                                                           ↑
+                                                     0.2 → 0.01
+                                                    %95 eridi!
+```
+
+---
+
+### Görsel: Hata Nasıl Eriyor?
+
+```
+Hata Katkısı (metre)
+  │
+0.20 ┤ ●                                          
+  │   ╲                                         
+0.15 ┤    ╲                                        
+  │      ╲                                      
+0.10 ┤        ╲                                     
+  │          ╲                                   
+0.05 ┤            ╲─────                              
+  │                  ─────────────── → 0'a yakınsar
+0.00 ┤─────────────────────────────────────────────
+  └──┬────┬────┬────┬────┬────┬────┬────┬────┬──
+    200  220  240  260  280  300  320  360  400  (ms)
+     ▲                                      ▲
+   Paket 2                              Paket 3
+   gelir                                gelir
+   Hata=0.2m                            Hata≈0.01m (eridi)
+```
+
+---
+
+### Konumlar Üzerinde: Karşılaştırma
+
+```
+Konum (metre - Kuzey ekseni)
+  │
+20 ┤                                          ╱ ← targetPos (ekstrapolasyon)
+  │                                        ╱    
+  │                                      ╱      
+  │                                   ╱ ╱ ← Görsel (target + eriyen hata)
+15 ┤                                ╱ ╱         
+  │                             ╱╱             
+  │                          ╱╱                 
+  │                       ╱╱                    
+10 ┤● ● ● ● ● ● ● ● ● ●╱                       
+  │  ↑               ╱↑                        
+  │  Görsel       ╱   Son_Gercek_Konum=9.8      
+  │  =10.0     ╱      (Yeni baz)                
+ 5 ┤          ╱                                  
+  │        ╱                                    
+  │      ╱                                      
+  │    ╱                                        
+ 0 ┤──●─────────────────────────────────────────
+  └──┬──────────┬──────────┬──────────┬────────
+    0ms       200ms      300ms      400ms
+              ▲ Paket2               ▲ Paket3
+```
+
+İki çizginin **başlangıçta (t=200ms) 0.2m farkla ayrıldığını** ve sonra **kademeli olarak birbirine yaklaştığını** görün. İşte sönümleme budur.
+
+---
+
+## Peki Ya Hata Olmadan Doğrudan Yapsa? (Sönümleme olmasaydı)
+
+Eğer sönümleme yerine `Görsel = targetPos` deseydin:
+
+```
+t=199ms: Görsel = 10.0m  (eski ekstrapolasyon)
+t=200ms: Paket gelir → Görsel = 9.8m  ← 0.2m GERİYE SIÇRAMA! 💥
+t=201ms: Görsel = 9.8 + 50×0.001 = 9.85m
+```
+
+Bu 0.2m'lik ani sıçrama ekranda görünür bir **"zıplama"** yaratır.
+
+Sönümleme bunu önler:
+```
+t=199ms: Görsel = 10.0m
+t=200ms: Görsel = 9.8 + 0.2×1.0 = 10.0m  ← AYNI! Sıçrama yok ✅
+t=201ms: Görsel = 9.85 + 0.2×0.985 = 10.047m  ← Yumuşak geçiş ✅
+```
+
+---
+
+## Özet: 3 Satırlık Mental Model
+
+```
+1. Paket gelir → Hata = (Görsel şimdi nerede) − (Sunucu nerede diyor)  → SABİT vektör olarak DONDURULUYOR
+2. Her frame  → Ekstrapolasyon YENİ bazdan ileriye gider (hedef = baz + hız×dt)
+3. Her frame  → Görsel = Hedef + Donmuş_Hata × (1.0'dan 0'a düşen çarpan)
+                                                  ↑
+                                         Bu çarpan zamanla küçüldüğü için
+                                         hatanın etkisi yavaşça sıfırlanır.
+                                         Uçak, ekstrapolasyon çizgisine
+                                         "yumuşakça oturur".
+```
+
+> [!NOTE]
+> **Anahtar kavram:** Hata vektörü değişmez, onu çarpan katsayı erir. 
+> Bu yüzden "eritme" denir — buz kütlesi (hata) yerinde durur ama zamanla küçülür (katsayı düşer).
