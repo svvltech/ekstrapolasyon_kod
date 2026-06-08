@@ -1,0 +1,26 @@
+önceki
+
+date.now() kullanılır. 1 ocak 1970 başlangıç noktasıdır.İşletim sistemi saatine bağlıdır. Kullanıcı saati manuel değiştirdiğinde veya sunucu ile senkronize edildiğinde (NTP) geriye veya ileriye atlayabilir.
+
+ham kayıtta birden ne kadar ilerletirsen paket saati olarak yerel saati(?) veriyodu.
+dolayısıyla çok ileri saat farkları hiç olmadı. 
+eski tarihli kayıt gelme durumu da olmadı. ham kayıtta nereye atlatırsan atlat saat hep yerel saat üzerinden geliyordu. 
+
+
+
+sonraki
+
+performance.now() kullanılır. Sayfanın yüklenmeye başladığı an başlangıç noktasıdır.Monotondur. Sistem saatinden bağımsızdır, geriye gitmez ve saatin değiştirilmesinden etkilenmez
+
+ham kayıtta birden ilerletirsen saat farkı ne kadar atladıysan o kadar fazla olur. 
+   + bu tür durumlarda farkları falan sıfırlamak gerekir :
+   	forceSync lerde lazım -- paketler arası gecen zaman maks sınırdan fazlaysa 
+			      -- sistem saati < this.sonsistem saati ise
+    
+
+
+
+ilk paket kontrolü için this.son_sistem_saati===0'ni kullanıyor olmamız yanlış -- gelen ilk paketin sistem saati 0 olmayabilir. paket sayısı ile kontrol edilmeli.
+
+
+
