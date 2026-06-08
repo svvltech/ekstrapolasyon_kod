@@ -2,7 +2,7 @@
 import * as Cesium from "cesium";
 
 export class MovementEngine {
-    
+
     private Son_Gercek_Konum = new Cesium.Cartesian3();
 
     private Rota_Acisi: number = 0;     // trackAngle -Gerçek ilerleme rotası (Fiziksel)
@@ -43,7 +43,7 @@ export class MovementEngine {
 
     private Konum_Hatasi = new Cesium.Cartesian3(); // Hedef ile Görsel arasındaki Konum Hatası
     private Yonelim_Hatasi = new Cesium.Quaternion(); // Hedef ile Görsel arasındaki Açı Hatası
-    
+
     // VERİ ZAMAN AŞIMI VE HAFIZA 
     private readonly MAKS_TAHMIN_SURESI = 3.0;
     private readonly HAFIZA_TEMIZLEME_SURESI = 3.0;
@@ -56,13 +56,13 @@ export class MovementEngine {
     private static readonly _sHpr = new Cesium.HeadingPitchRoll();
     private static readonly _sNewQuat = new Cesium.Quaternion();
     private static readonly _sInvEnuMatrix = new Cesium.Matrix4();
-    private static readonly _sTrackDiff = new Cesium.Cartesian3(); 
-    private static readonly _sTrackEnu = new Cesium.Cartesian3();  
-    private static readonly _sNewPos = new Cesium.Cartesian3();    
+    private static readonly _sTrackDiff = new Cesium.Cartesian3();
+    private static readonly _sTrackEnu = new Cesium.Cartesian3();
+    private static readonly _sNewPos = new Cesium.Cartesian3();
     private static readonly _sNewPosValid = new Cesium.Cartesian3();
     private static readonly _sInvNewQuat = new Cesium.Quaternion();
     private static readonly _sDecayedOriError = new Cesium.Quaternion();
-    
+
     constructor(initialLon: number, initialLat: number, initialHeight: number, initialH: number = 0, initialP: number = 0, initialR: number = 0) {
         // Verilen derece cinsinden coğrafi konumu Cesium'un kullandığı ECEF koordinatlarına çevirir
         Cesium.Cartesian3.fromDegrees(initialLon, initialLat, initialHeight, Cesium.Ellipsoid.WGS84, this.Guncel_Gorsel_Konum);
@@ -82,7 +82,7 @@ export class MovementEngine {
         this.Son_Rota_Acisi = initialH;
 
         this.Son_Paket_Yerel_Zamanı = performance.now();
-        
+
         Cesium.Cartesian3.ZERO.clone(this.Konum_Hatasi);
         Cesium.Quaternion.IDENTITY.clone(this.Yonelim_Hatasi);
     }
@@ -108,17 +108,18 @@ export class MovementEngine {
             // Sadece yerel kronometreyi sıfırla (timeout engeli + sönümleme dt sıfırlama).
             // Ekstrapolasyon: estimatedServerNow doğal olarak ilerlemeye devam eder,
             // uçak son bilinen hızıyla pürüzsüzce ilerler, 3sn sonra otomatik durur.
-            this.Son_Paket_Yerel_Zamanı = localNow; 
-            return; 
+            this.Son_Paket_Yerel_Zamanı = localNow;
+            return;
         }
 
         const test_pos = Cesium.Cartesian3.fromDegrees(lon, lat, alt, Cesium.Ellipsoid.WGS84, MovementEngine._sNewPosValid);
         // konum aynıysa h p r nin degismesi bi şey ifade etmez uçak konum değişmeden h p r sini değiştiremez
-        if (test_pos.equals(this.Son_Gercek_Konum) ) /* && 
+        if (test_pos.equals(this.Son_Gercek_Konum)) /* && 
             h === this.Son_Pruva_Acisi && 
             p === this.Yunuslama_Acisi && 
             r === this.Yatis_Acisi)*/ {
             // Sunucu saati gerçekten ilerledi → offset'i EMA ile güncelle (hard-set jitter yapar)
+            /*
             const currentOffset = (localNow / 1000.0) - son_sunucu_saati_sn;
             if (this.Sunucu_Zaman_Farki === 0) {
                 this.Sunucu_Zaman_Farki = currentOffset;
@@ -127,6 +128,7 @@ export class MovementEngine {
             }
             this.Son_Sunucu_Zamani = son_sunucu_saati_sn;
             this.Son_Paket_Yerel_Zamanı = localNow;
+            */
             return;
         }
 
@@ -167,13 +169,13 @@ export class MovementEngine {
 
         // Kronometreleri ve zamanı güncelle
         this.Son_Sunucu_Zamani = son_sunucu_saati_sn;
-        this.Son_Paket_Yerel_Zamanı = localNow; 
+        this.Son_Paket_Yerel_Zamanı = localNow;
 
         // ZAMAN AŞIMI (Timeout) ve HAFIZA TEMİZLİĞİ
         if (dtPacket > this.MAKS_TAHMIN_SURESI) {
             console.log(`[MovementEngine] ${dtLocal.toFixed(1)}s LAG -> Bağlantı koptu/gecikti, ForceSync yapılıyor.`);
             this.forceSync(lon, lat, alt, yatay_Hiz, h, p, r);
-            return; 
+            return;
         }
 
         if (dtPacket > this.HAFIZA_TEMIZLEME_SURESI && this.Paket_Sayisi > 0) {
@@ -185,43 +187,43 @@ export class MovementEngine {
             this.Dikey_Hiz = 0;
             this.Paket_Sayisi = 1; // 1 yapılarak baştan hız hesabı yapması sağlanır
         }
-        
+
         // Yeni Konum (ECEF)
         this.Paket_Sayisi++;
         const newPos = Cesium.Cartesian3.fromDegrees(lon, lat, alt, Cesium.Ellipsoid.WGS84, MovementEngine._sNewPos);
-        
+
 
         // --- FİZİK VE DÖNÜŞ HIZI HESAPLAMALARI ---
         if (dtPacket > 0.01 && this.Paket_Sayisi > 0) {
-            const diff = Cesium.Cartesian3.subtract(newPos, this.Son_Gercek_Konum, MovementEngine._sTrackDiff);          
+            const diff = Cesium.Cartesian3.subtract(newPos, this.Son_Gercek_Konum, MovementEngine._sTrackDiff);
             Cesium.Transforms.eastNorthUpToFixedFrame(this.Son_Gercek_Konum, Cesium.Ellipsoid.WGS84, MovementEngine._sEnuMatrix);
             const invEnu = Cesium.Matrix4.inverse(MovementEngine._sEnuMatrix, MovementEngine._sInvEnuMatrix);
             const localDiff = Cesium.Matrix4.multiplyByPointAsVector(invEnu, diff, MovementEngine._sTrackEnu);
 
-            const moveDist = Math.hypot(localDiff.x , localDiff.y); // Z ekseni hariç yatay yer değiştirme
-            let rawTrackTurnRate = 0; 
+            const moveDist = Math.hypot(localDiff.x, localDiff.y); // Z ekseni hariç yatay yer değiştirme
+            let rawTrackTurnRate = 0;
 
             // 1. DURMA KONTROLÜ (Hizalama - Alignment)
-            if (this.Yatay_Hiz < 2.0) { 
-                rawTrackTurnRate = 0; 
+            if (this.Yatay_Hiz < 2.0) {
+                rawTrackTurnRate = 0;
                 this.Rota_Acisi = h; // Atan2 gürültüsünü engellemek için rotayı burna kilitle
             }
             // 2. GÜRÜLTÜ / BURST KONTROLÜ (Yan uçuşu / Crab Flight koruması)
             else if (moveDist < 1.5) {
                 // Mesafe yeni kavis hesaplamak için çok kısa. Eski istikrarı bozma.
-                rawTrackTurnRate = this.Rota_Donus_Hizi; 
+                rawTrackTurnRate = this.Rota_Donus_Hizi;
             }
             // 3. NORMAL
             else {
-                this.Rota_Acisi = Math.atan2(localDiff.x, localDiff.y);  
+                this.Rota_Acisi = Math.atan2(localDiff.x, localDiff.y);
                 if (this.Paket_Sayisi > 2) {
                     let deltaT = this.Rota_Acisi - this.Son_Rota_Acisi;
                     if (deltaT > Math.PI) deltaT -= Math.PI * 2;
                     if (deltaT < -Math.PI) deltaT += Math.PI * 2;
                     rawTrackTurnRate = deltaT / dtPacket;
                 }
-            }       
-            
+            }
+
             let rawDikeyHiz = (alt - this.Son_Irtifa) / dtPacket;
             let rawTurnRate = 0;
             let rawPitchRate = 0;
@@ -234,19 +236,19 @@ export class MovementEngine {
                 let deltaH = h - this.Son_Pruva_Acisi;
                 if (deltaH > Math.PI) deltaH -= Math.PI * 2;
                 if (deltaH < -Math.PI) deltaH += Math.PI * 2;
-                if(Math.abs(deltaH) < 0.008) deltaH = 0; // Açısal ölü bölge (Deadband)
+                if (Math.abs(deltaH) < 0.008) deltaH = 0; // Açısal ölü bölge (Deadband)
                 rawTurnRate = deltaH / safeDt;
 
                 let deltaP = p - this.Yunuslama_Acisi;
                 if (deltaP > Math.PI) deltaP -= Math.PI * 2;
                 if (deltaP < -Math.PI) deltaP += Math.PI * 2;
-                if(Math.abs(deltaP) < 0.008) deltaP = 0;
+                if (Math.abs(deltaP) < 0.008) deltaP = 0;
                 rawPitchRate = deltaP / safeDt;
 
                 let deltaR = r - this.Yatis_Acisi;
                 if (deltaR > Math.PI) deltaR -= Math.PI * 2;
                 if (deltaR < -Math.PI) deltaR += Math.PI * 2;
-                if(Math.abs(deltaR) < 0.008) deltaR = 0;
+                if (Math.abs(deltaR) < 0.008) deltaR = 0;
                 rawRollRate = deltaR / safeDt;
             }
 
@@ -260,7 +262,7 @@ export class MovementEngine {
             } else {
                 this.Rota_Donus_Hizi = (this.Rota_Donus_Hizi * 0.8) + (rawTrackTurnRate * 0.2);
                 this.Dikey_Hiz = (this.Dikey_Hiz * 0.8) + (rawDikeyHiz * 0.2);
-                this.Pruva_Donus_Hizi = (this.Pruva_Donus_Hizi * 0.8) + (rawTurnRate * 0.2); 
+                this.Pruva_Donus_Hizi = (this.Pruva_Donus_Hizi * 0.8) + (rawTurnRate * 0.2);
                 this.Yunuslama_Hizi = (this.Yunuslama_Hizi * 0.8) + (rawPitchRate * 0.2);
                 this.Yatis_Hizi = (this.Yatis_Hizi * 0.8) + (rawRollRate * 0.2);
             }
@@ -281,7 +283,7 @@ export class MovementEngine {
         } else {
             // Vektörel Hata: Görsel şu an asıl hedeften ne kadar uzakta?
             Cesium.Cartesian3.subtract(this.Guncel_Gorsel_Konum, newPos, this.Konum_Hatasi);
-            
+
             // Rotasyonel Hata: Bükülme farkı (Inverse Quat Çarpımı)
             const invNewQuat = Cesium.Quaternion.inverse(newQuat, MovementEngine._sInvNewQuat);
             Cesium.Quaternion.multiply(this.Guncel_Gorsel_Yonelim, invNewQuat, this.Yonelim_Hatasi);
@@ -293,10 +295,10 @@ export class MovementEngine {
             }
 
             const nokta_carpim = Cesium.Quaternion.dot(this.Guncel_Gorsel_Yonelim, newQuat);
-            const aci_farki_radyan = 2.0 * Math.acos(Math.min(Math.abs(nokta_carpim),1.0));
-            if ( aci_farki_radyan > 45.0) {
+            const aci_farki_radyan = 2.0 * Math.acos(Math.min(Math.abs(nokta_carpim), 1.0));
+            if (aci_farki_radyan > 45.0) {
                 Cesium.Quaternion.IDENTITY.clone(this.Yonelim_Hatasi);
-                Cesium.Quaternion.clone(newQuat, this.Guncel_Gorsel_Yonelim);                
+                Cesium.Quaternion.clone(newQuat, this.Guncel_Gorsel_Yonelim);
             }
         }
 
@@ -318,10 +320,9 @@ export class MovementEngine {
      * Bu iki bağımsız saat orijinal kodun titremesiz çalışmasını sağlayan mimaridir.
      */
     public Guncel_Konumu_Getir(result: Cesium.Cartesian3): Cesium.Cartesian3 {
-        if((this.Son_Gercek_Konum.x===0 && this.Son_Gercek_Konum.y===0 && this.Son_Gercek_Konum.z===0) 
-            || !Number.isFinite(this.Son_Gercek_Konum.x) || !Number.isFinite(this.Son_Gercek_Konum.y) || !Number.isFinite(this.Son_Gercek_Konum.z))
-        {
-            return Cesium.Cartesian3.clone(this.Son_Gercek_Konum , this.Guncel_Gorsel_Konum);
+        if ((this.Son_Gercek_Konum.x === 0 && this.Son_Gercek_Konum.y === 0 && this.Son_Gercek_Konum.z === 0)
+            || !Number.isFinite(this.Son_Gercek_Konum.x) || !Number.isFinite(this.Son_Gercek_Konum.y) || !Number.isFinite(this.Son_Gercek_Konum.z)) {
+            return Cesium.Cartesian3.clone(this.Son_Gercek_Konum, this.Guncel_Gorsel_Konum);
         }
 
         const localNow = performance.now();
@@ -332,9 +333,9 @@ export class MovementEngine {
         let dtSincePacket = estimatedServerNow - this.Son_Sunucu_Zamani;
 
         if (dtSincePacket < 0) dtSincePacket = 0;
-        if (dtSincePacket > this.MAKS_TAHMIN_SURESI){
-            return Cesium.Cartesian3.clone(this.Guncel_Gorsel_Konum ,result);
-        } 
+        if (dtSincePacket > this.MAKS_TAHMIN_SURESI) {
+            return Cesium.Cartesian3.clone(this.Guncel_Gorsel_Konum, result);
+        }
 
         // --- SÖNÜMLEME dt: Yerel kronometre ile (bağımsız) ---
         const timeSinceLastUpdate = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
@@ -344,7 +345,7 @@ export class MovementEngine {
 
         if (dtSincePacket > 0 && this.Yatay_Hiz > 1.0 && this.Paket_Sayisi >= 2) {
             const moveEnu = MovementEngine._sMoveEnu;
-            
+
             // Eğer dönüş hızı çok küçükse (düz uçuş), sıfıra bölme hatasını önlemek için lineer (kiriş) yaklaşım
             if (Math.abs(this.Rota_Donus_Hizi) < 0.001) {
                 const predictedTrack = this.Rota_Acisi + (this.Rota_Donus_Hizi * dtSincePacket);
@@ -354,10 +355,10 @@ export class MovementEngine {
                 // Uçak virajdaysa CTRV (Yay İntegrali) kavis modeli
                 const theta0 = this.Rota_Acisi;
                 const theta1 = theta0 + (this.Rota_Donus_Hizi * dtSincePacket);
-                const R = this.Yatay_Hiz / this.Rota_Donus_Hizi; 
+                const R = this.Yatay_Hiz / this.Rota_Donus_Hizi;
 
-                moveEnu.x = R * (Math.cos(theta0) - Math.cos(theta1)); 
-                moveEnu.y = R * (Math.sin(theta1) - Math.sin(theta0)); 
+                moveEnu.x = R * (Math.cos(theta0) - Math.cos(theta1));
+                moveEnu.y = R * (Math.sin(theta1) - Math.sin(theta0));
             }
 
             moveEnu.z = this.Dikey_Hiz * dtSincePacket;
@@ -370,22 +371,22 @@ export class MovementEngine {
         // 2. SÖNÜMLEME (Hata Yayını Eritme - Error Blending)
         // timeSinceLastUpdate kullanılır (yerel kronometre — ekstrapolasyondan bağımsız)
         const pozisyon_hatasi_buyukluk = Cesium.Cartesian3.magnitude(this.Konum_Hatasi);
-        let sonumleme_carpani = 3.0; 
-        
+        let sonumleme_carpani = 3.0;
+
         // Araç yavaşsa ve hata küçükse (İniş veya Taksi durumu) amortisörü yumuşat
-        if(this.Yatay_Hiz < 5.0){
-            if(pozisyon_hatasi_buyukluk < 0.5){
+        if (this.Yatay_Hiz < 5.0) {
+            if (pozisyon_hatasi_buyukluk < 0.5) {
                 sonumleme_carpani = 0.5;
             } else {
                 sonumleme_carpani = 1.0;
             }
         }
-        
-        const safeBlendDuration = this.Ortalama_Paket_Suresi; 
-        const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration; 
+
+        const safeBlendDuration = this.Ortalama_Paket_Suresi;
+        const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration;
         let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * timeSinceLastUpdate);
-        
-        if(Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
+
+        if (Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
 
         // Görsel Konum = Kusursuz Tahmin (TargetPos) + Eriyen Hata
         const currentError = Cesium.Cartesian3.multiplyByScalar(this.Konum_Hatasi, Sonumleme_Katsayisi, MovementEngine._sMoveEcef);
@@ -393,11 +394,10 @@ export class MovementEngine {
 
         return Cesium.Cartesian3.clone(this.Guncel_Gorsel_Konum, result);
     }
-    
+
     public Guncel_Yonelimi_Getir(result: Cesium.Quaternion): Cesium.Quaternion {
-        if(!Number.isFinite(this.Guncel_Gorsel_Konum.x) || !Number.isFinite(this.Guncel_Gorsel_Konum.y) || !Number.isFinite(this.Guncel_Gorsel_Konum.z))
-        {
-            return Cesium.Quaternion.clone( this.Guncel_Gorsel_Yonelim , result);
+        if (!Number.isFinite(this.Guncel_Gorsel_Konum.x) || !Number.isFinite(this.Guncel_Gorsel_Konum.y) || !Number.isFinite(this.Guncel_Gorsel_Konum.z)) {
+            return Cesium.Quaternion.clone(this.Guncel_Gorsel_Yonelim, result);
         }
 
         const localNow = performance.now();
@@ -429,23 +429,23 @@ export class MovementEngine {
         // Açısal Hatanın Sönümlenmesi (SLERP)
         // timeSinceLastUpdate kullanılır (yerel kronometre — ekstrapolasyondan bağımsız)
         const oryatasyon_hatasi_buyukluk = Cesium.Cartesian3.magnitude(this.Yonelim_Hatasi);
-        let sonumleme_carpani = 3.0; 
-        if(this.Yatay_Hiz < 5.0){
-            if(oryatasyon_hatasi_buyukluk < 0.5){
-                sonumleme_carpani = 0.5; 
+        let sonumleme_carpani = 3.0;
+        if (this.Yatay_Hiz < 5.0) {
+            if (oryatasyon_hatasi_buyukluk < 0.5) {
+                sonumleme_carpani = 0.5;
             } else {
                 sonumleme_carpani = 1.0;
             }
         }
-        
-        const safeBlendDuration = Math.max(this.Ortalama_Paket_Suresi, 0.2); 
-        const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration; 
+
+        const safeBlendDuration = Math.max(this.Ortalama_Paket_Suresi, 0.2);
+        const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration;
         let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * timeSinceLastUpdate);
-        if(Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
+        if (Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
 
         // IDENTITY (Sıfır hata) durumuna doğru küresel yumuşatma
         const decayedOriError = Cesium.Quaternion.slerp(Cesium.Quaternion.IDENTITY, this.Yonelim_Hatasi, Sonumleme_Katsayisi, MovementEngine._sDecayedOriError);
-        
+
         // Görsel Yönelim = Eriyen Bükülme Hatası * Kusursuz Yönelim
         Cesium.Quaternion.multiply(decayedOriError, predictedQuat, this.Guncel_Gorsel_Yonelim);
 
@@ -454,11 +454,11 @@ export class MovementEngine {
 
     private forceSync(lon: number, lat: number, alt: number, speed: number, h: number, p: number, r: number) {
         const posEcef = Cesium.Cartesian3.fromDegrees(lon, lat, alt, Cesium.Ellipsoid.WGS84, MovementEngine._sNewPos);
-        
+
         // Temel referansları hedefe zımbala
         Cesium.Cartesian3.clone(posEcef, this.Son_Gercek_Konum);
         Cesium.Cartesian3.clone(posEcef, this.Guncel_Gorsel_Konum);
-        
+
         const quat = this.calculateQuaternion(posEcef, h, p, r);
         Cesium.Quaternion.clone(quat, this.Guncel_Gorsel_Yonelim);
 
@@ -495,5 +495,5 @@ export class MovementEngine {
         );
     }
 
-    
+
 }
