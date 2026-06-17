@@ -1,0 +1,136 @@
+# Walkthrough: ekstrapol.ts → ekstrapol_zaman_guncelleme.ts
+
+## Genel Özet
+
+[ekstrapol.ts](file:///c:/Users/108883/ekstrapolasyon_kod/ekstrapol.ts) referans alınarak [ekstrapol_zaman_guncelleme.ts](file:///c:/Users/108883/ekstrapolasyon_kod/ekstrapol_zaman_guncelleme.ts) oluşturuldu.
+
+**Amaç:** Zaman sistemini string-bazlı epoch offset'den float-bazlı simülasyon saati + yerel kronometreye geçirmek.
+
+---
+
+## Değişiklik Tablosu
+
+| Bölüm | Orijinal (`ekstrapol.ts`) | Yeni (`ekstrapol_zaman_guncelleme.ts`) |
+|---|---|---|
+| **Zaman değişkenleri** | `Sunucu_Zaman_Farki` (EMA offset) mevcut | **Kaldırıldı** — offset yok |
+| **Constructor** | `Date.now()` | `performance.now()` |
+| **onPacketReceived param** | `serverTimestamp_str: string` | `son_sunucu_saati_sn: number` (float sn) |
+| **Paket validasyonu** | Ayrı `isValidPacket()` metodu | Inline validasyon (5 adım) |
+| **Timeout kontrolü** | Sadece `dtPacket > 3s` | `dtPacket > 3s ∥ dtLocal > 3s` (pause→resume) |
+| **forceSync parametreleri** | 7 param (zaman dışarıda set) | 9 param (`serverTime`, `localNow` dahil) |
+| **Render dt** | İki farklı dt (offset + yerel) | **Tek dt** (yerel kronometre) |
+| **Sönümleme** | Standart exponential decay | **Çözüm A:** `maxRate = hız / hata` clamp |
+| **parseTimeOnlyToEpoch** | Dosya sonunda var | **Kaldırıldı** |
+
+---
+
+## Detaylı Değişiklikler
+
+### 1. Kaldırılan Değişkenler
+
+```diff
+- private Sunucu_Zaman_Farki: number = 0;  // serverClientOffset
+```
+
+> [!IMPORTANT]
+> EMA offset kaldırıldı. Farklı epoch'lar arasında offset tutmak, pause/resume sırasında EMA drift sorunlarına yol açıyordu.
+
+### 2. Constructor
+
+```diff
+- this.Son_Paket_Yerel_Zamanı = Date.now();
++ this.Son_Paket_Yerel_Zamanı = performance.now();
+```
+
+### 3. onPacketReceived — Parametre
+
+```diff
+- public onPacketReceived(... serverTimestamp_str: string)
++ public onPacketReceived(... son_sunucu_saati_sn: number)
+```
+
+### 4. onPacketReceived — Inline Validasyon
+
+`isValidPacket()` kaldırılıp 5 adımlı inline validasyon eklendi:
+
+1. **NaN/Infinity kontrolü** — `son_sunucu_saati_sn` de dahil
+2. **Aynı sunucu saati** — simülasyon duraklatılmış, hiçbir state güncellenmez
+3. **İlk paket** — `Son_Sunucu_Zamani === 0` → forceSync
+4. **Geriye sarma** — `son_sunucu_saati_sn < Son_Sunucu_Zamani` → forceSync
+5. **Aynı konum** — titreme önleme, hiçbir state güncellenmez
+
+### 5. onPacketReceived — Offset Kaldırıldı
+
+```diff
+- const currentOffset = localNow - serverTimestamp_ms; 
+- if (this.Sunucu_Zaman_Farki === 0) {
+-     this.Sunucu_Zaman_Farki = currentOffset;
+- } else {
+-     this.Sunucu_Zaman_Farki = this.Sunucu_Zaman_Farki * 0.9 + currentOffset * 0.1;
+- }
+- this.Son_Sunucu_Zamani = serverTimestamp_ms;
++ this.Son_Sunucu_Zamani = son_sunucu_saati_sn;
++ this.Son_Paket_Yerel_Zamanı = localNow;
+```
+
+### 6. onPacketReceived — dtLocal + Pause→Resume
+
+```diff
+- if (dtPacket > this.MAKS_TAHMIN_SURESI) {
++ if (dtPacket > this.MAKS_TAHMIN_SURESI || dtLocal > this.MAKS_TAHMIN_SURESI) {
+```
+
+> [!IMPORTANT]
+> `dtLocal > 3s` kontrolü eklendi. Simülasyon pause'da iken sunucu saati donuyor, dtPacket küçük kalıyor. Orijinal kodda gerekmiyordu çünkü sunucu epoch bazlı zaman gönderiyordu.
+
+### 7. Guncel_Konumu_Getir — Tek dt
+
+```diff
+- const localNow = Date.now();
+- const estimatedServerNow = localNow - this.Sunucu_Zaman_Farki;
+- let dtSincePacket = (estimatedServerNow - this.Son_Sunucu_Zamani) / 1000;
++ const localNow = performance.now();
++ let dtSincePacket = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
+```
+
+### 8. Guncel_Konumu_Getir — Çözüm A (Anti-Jitter)
+
+```diff
+- const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration;
+- let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * timeSinceLastUpdate);
++ const normalRate = sonumleme_carpani / safeBlendDuration;
++ const maxRate = this.Yatay_Hiz / Math.max(pozisyon_hatasi_buyukluk, 0.01);
++ const Sonumleme_Hizi = Math.max(0.5, Math.min(normalRate, maxRate));
++ let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * dtSincePacket);
+```
+
+> [!TIP]
+> `Math.max(0.5, ...)` → minimum erime hızı. Duran araçta bile hata 4 saniyede %87 eriyor.
+> `Math.min(normalRate, maxRate)` → hata eritme asla ekstrapolasyondan hızlı olamaz.
+
+### 9. forceSync — Zaman Parametreleri
+
+```diff
+- private forceSync(lon, lat, alt, speed, h, p, r) {
++ private forceSync(lon, lat, alt, speed, h, p, r, serverTime: number, localNow: number) {
++     this.Son_Sunucu_Zamani = serverTime;
++     this.Son_Paket_Yerel_Zamanı = localNow;
+```
+
+### 10. Kaldırılan Fonksiyon
+
+```diff
+- function parseTimeOnlyToEpoch(timeStr: string): number { ... }
+```
+
+---
+
+## Doğrulama
+
+- ✅ `Date.now()` → tüm kullanımlar `performance.now()` ile değiştirildi
+- ✅ `Sunucu_Zaman_Farki` → değişken tanımı ve tüm kullanımları kaldırıldı
+- ✅ `parseTimeOnlyToEpoch` → fonksiyon kaldırıldı
+- ✅ Fizik hesaplamaları (turnRate, trackTurnRate, EMA) → orijinalle birebir aynı
+- ✅ Hata yakalama (Konum_Hatasi, Yonelim_Hatasi) → orijinalle birebir aynı
+- ✅ Çözüm A → `Guncel_Konumu_Getir`'de `maxRate` clamp eklendi
+- ✅ `isValidPacket` metodu → inline validasyona dönüştürüldü
