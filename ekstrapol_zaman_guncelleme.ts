@@ -509,7 +509,10 @@ export class MovementEngine {
         // Offset yok — doğrudan yerel süre ölçümü
         let dtSincePacket = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
         if (dtSincePacket < 0) dtSincePacket = 0;
-        if (dtSincePacket > this.MAKS_TAHMIN_SURESI) dtSincePacket = this.MAKS_TAHMIN_SURESI;
+        if (dtSincePacket > this.MAKS_TAHMIN_SURESI) {
+            // 3 saniyeden uzun süredir veri yok → görsel yönelimi dondur
+            return Cesium.Quaternion.clone(this.Guncel_Gorsel_Yonelim, result);
+        }
 
         // Heading'i turnRate ile tahmin et
         const predictedHeading = this.Son_Pruva_Acisi + (this.Pruva_Donus_Hizi * dtSincePacket);
@@ -527,19 +530,38 @@ export class MovementEngine {
             MovementEngine._sNewQuat
         );
 
-        // HATA VEKTÖRÜNÜ ERİT (ERROR BLENDING)
+        // HATA VEKTÖRÜNÜ ERİT (ERROR BLENDING) — ÇÖZÜM A İLE
         // Aynı dt kullanılır (tek saat mimarisi)
-        const oryatasyon_hatasi_buyukluk = Cesium.Cartesian3.magnitude(this.Yonelim_Hatasi);
+        //
+        // Açısal hata büyüklüğünü quaternion dot product ile hesapla (radyan cinsinden)
+        // Yonelim_Hatasi, IDENTITY'ye yakınsa hata küçük, uzaksa büyük.
+        const ori_dot = Cesium.Quaternion.dot(Cesium.Quaternion.IDENTITY, this.Yonelim_Hatasi);
+        const acısal_hata_radyan = 2.0 * Math.acos(Math.min(Math.abs(ori_dot), 1.0));
+
         let sonumleme_carpani = 3.0;
         if (this.Yatay_Hiz < 5.0) {
-            if (oryatasyon_hatasi_buyukluk < 0.5) {
+            if (acısal_hata_radyan < 0.05) { // ~3° altında
                 sonumleme_carpani = 0.5;
             } else {
                 sonumleme_carpani = 1.0;
             }
         }
         const safeBlendDuration = Math.max(this.Ortalama_Paket_Suresi, 0.2);
-        const Sonumleme_Hizi = sonumleme_carpani / safeBlendDuration;
+        const normalRate_ori = sonumleme_carpani / safeBlendDuration;
+
+        // ÇÖZÜM A (Yönelim): Ters dönüş önleyici
+        // Açısal "hız" olarak 3 eksendeki en büyük dönüş hızını kullan
+        // rate ≤ açısal_hız / açısal_hata → eritme asla dönüşten hızlı olamaz
+        const acisal_hiz = Math.max(
+            Math.abs(this.Pruva_Donus_Hizi),
+            Math.abs(this.Yunuslama_Hizi),
+            Math.abs(this.Yatis_Hizi)
+        );
+        const maxRate_ori = acisal_hiz / Math.max(acısal_hata_radyan, 0.001);
+
+        // Minimum 0.5: duran/düz uçan araçta bile açısal hata yavaşça erisin
+        const Sonumleme_Hizi = Math.max(0.5, Math.min(normalRate_ori, maxRate_ori));
+
         let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * dtSincePacket);
         // Paketler arası süre çok azsa bile biraz sönümle ki titremesin
         if (Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
