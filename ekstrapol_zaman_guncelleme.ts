@@ -357,7 +357,9 @@ export class MovementEngine {
             const nokta_carpim = Cesium.Quaternion.dot(this.Guncel_Gorsel_Yonelim, newQuat);
             const aci_farki_radyan = 2.0 * Math.acos(Math.min(Math.abs(nokta_carpim), 1.0));
 
-            if (aci_farki_radyan > 45.0) {
+            // Güvenlik: Eğer yönelim hatası 45 dereceden (~0.785 radyan) büyükse sönümleme yapma, doğrudan eşitle.
+            const MAKS_ACI_SAPMASI_RADYAN = Cesium.Math.toRadians(45.0); // 45 derece radyan karşılığı
+            if (aci_farki_radyan > MAKS_ACI_SAPMASI_RADYAN) {
                 Cesium.Quaternion.IDENTITY.clone(this.Yonelim_Hatasi);
                 Cesium.Quaternion.clone(newQuat, this.Guncel_Gorsel_Yonelim);
             }
@@ -588,7 +590,7 @@ export class MovementEngine {
      * Bu tutarlılığı garanti eder: forceSync çağrılan HER yerde zamanlar doğrudur.
      */
     private forceSync(lon: number, lat: number, alt: number, speed: number, h: number, p: number, r: number,
-                      serverTime: number, localNow: number) {
+        serverTime: number, localNow: number) {
         // 1. Konum ve görsel durumu hedefe ışınla
         const posEcef = Cesium.Cartesian3.fromDegrees(lon, lat, alt, Cesium.Ellipsoid.WGS84, MovementEngine._sNewPos);
 
