@@ -1,0 +1,77 @@
+# Oynatma Hızı (Time Scale) Çarpanı Çözüm Planı
+
+## Sorun Tanımı
+
+Oynatma hızı `0.5x` veya `8x` yapıldığında sistemin titreşerek/atlayarak çalışmasının kök nedeni **zaman birimlerinin birbirine girmesidir.**
+
+Fiziksel hızlar (örn. `Yatay_Hiz` = 100 m/s) **simülasyon zamanına** göre hesaplanıyor. Ancak ekstrapolasyon, `performance.now()` üzerinden hesaplanan **gerçek (duvar saati) zamanı** (`dtSincePacket`) kullanıyor.
+
+**Örnek (8x Hızında):**
+- Sunucudan gelen paketler arası simülasyon zamanı: `0.2 sn`
+- Gerçekte bu paketlerin geliş süresi: `0.025 sn` (8 kat daha hızlı)
+- Ekstrapolasyon `0.025 sn` kullanıyor → Uçağı sadece 2.5 metre ilerletiyor (oysa simülasyonda 20 metre gitmeliydi!).
+- Yeni paket geldiğinde 17.5 metrelik devasa bir "hata" oluşuyor ve uçak aniden ileri ışınlanıyor/titriyor.
+
+---
+
+## Çözüm Planı: Dinamik Zaman Çarpanı (Time Scale)
+
+Sistem dışarıdan oynatma hızını (`8x`, `0.5x`) parametre olarak almıyor. Bu hızı ağdaki paket geliş aralıklarından **dinamik olarak tahmin etmeliyiz.**
+
+### 1. `MovementEngine` Sınıfına Yeni Değişkenler
+
+```typescript
+private Ortalama_Sunucu_Paket_Suresi: number = 0.2; // Simülasyon zamanı ritmi
+private Zaman_Carpani: number = 1.0; // (Simülasyon Zamanı / Gerçek Zaman) oranı
+```
+
+### 2. `onPacketReceived` İçinde Zaman Çarpanı Hesabı
+
+Her iki saati de yumuşatıp (EMA) birbirine oranlayarak oynatma hızını kesin olarak bulabiliriz:
+
+```typescript
+// 1. Simülasyon zamanındaki (sunucu) paket aralığını bul
+const clampedDtPacket = Math.max(0.05, Math.min(dtPacket, 2.0));
+this.Ortalama_Sunucu_Paket_Suresi = this.Ortalama_Sunucu_Paket_Suresi * 0.8 + clampedDtPacket * 0.2;
+
+// 2. Gerçek zamandaki (yerel) paket aralığını bul (mevcut kod)
+// ...
+
+// 3. Zaman Çarpanını Hesapla (örn: 0.2 / 0.025 = 8.0)
+if (this.Ortalama_Paket_Suresi > 0.001) {
+    this.Zaman_Carpani = this.Ortalama_Sunucu_Paket_Suresi / this.Ortalama_Paket_Suresi;
+}
+```
+
+### 3. `Guncel_Konumu_Getir` İçinde Birim Ayrımı
+
+**A) Ekstrapolasyon (Simülasyon Zamanı ile yapılmalı):**
+```typescript
+let realDt = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
+// Ekstrapolasyon, hıza uygun olarak "Simüle Edilen Zaman" kadar ilerlemeli
+let simDt = realDt * this.Zaman_Carpani; 
+
+// Formüllerde dtSincePacket yerine simDt kullanılacak
+moveEnu.x = Math.sin(predictedTrack) * this.Yatay_Hiz * simDt; 
+```
+
+**B) Sönümleme / Hata Eritme (Gerçek Zaman ile yapılmalı):**
+Hata eritme görsel bir efekttir ve izleyicinin gerçek zaman algısına uygun olmalıdır. Ancak "Geri Çekilme Önleyici" hız kısıtı (`maxRate`) hesaplanırken, uçağın ekrandaki **gerçek görsel hızı** kullanılmalıdır:
+```typescript
+// Görsel hız (gerçek saniyede alınan metre) = Simülasyon Hızı * Oynatma Hızı
+const gorsel_hiz = this.Yatay_Hiz * this.Zaman_Carpani;
+const maxRate = gorsel_hiz / Math.max(pozisyon_hatasi_buyukluk, 0.01);
+```
+
+### 4. `Guncel_Yonelimi_Getir` İçinde Aynı Mantık
+
+- Açısal tahminlerde `simDt` kullanılacak.
+- Açısal `maxRate` hesaplanırken `açısal_hız * this.Zaman_Carpani` kullanılacak.
+- `safeBlendDuration` içindeki hardcode edilmiş `0.2` saniye limitini kaldıracağız, yoksa 8x hızında paketler 0.025s'de gelse bile sönümleme 0.2s sürer ve uçağın burnu dönmekte gecikir. `Math.max(this.Ortalama_Paket_Suresi, 0.05)` kullanılacak.
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> Bu mantık ile uçak 8x hızda seyrederken ekstrapolasyon adımları 8 kat büyütülecek, böylece sunucu konumu ile eş zamanlı ilerleyecek ve paket geldiğinde "dev hata" oluşmayacak. Planı onaylarsanız derhal uygulayıp testi size bırakacağım. Uygun mudur?
