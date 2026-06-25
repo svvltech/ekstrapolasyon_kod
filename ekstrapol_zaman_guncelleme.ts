@@ -39,7 +39,14 @@ export class MovementEngine {
     private Son_Paket_Yerel_Zamanı: number = 0; // lastPacketLocalTime (ms)
 
     // Ağın Ritmi ve Hata Yönetimi
-    private Ortalama_Paket_Suresi: number = 0.2; // avgPacketDt - Ağın ortalama paket süresi (Varsayılan 200ms)
+    private Ortalama_Paket_Suresi: number = 0.2; // avgPacketDt - Sunucu zamanında paket aralığı (Varsayılan 200ms)
+
+    // --- OYNATMA HIZI ORANI (Zaman Çarpanı) ---
+    // Simülasyon zamanı / Gerçek zaman oranı. Dinamik olarak hesaplanır.
+    // 1x → 1.0, 8x → 8.0, 0.5x → 0.5
+    // Ekstrapolasyon simDt = realDt × Zaman_Carpani ile simülasyon zamanına çevrilir.
+    // Böylece oynatma hızından bağımsız doğru tahmin yapılır.
+    private Zaman_Carpani: number = 1.0;
     private Konum_Hatasi = new Cesium.Cartesian3(); // Hedef ile Görsel arasındaki Konum Hatası
     private Yonelim_Hatasi = new Cesium.Quaternion(); // Hedef ile Görsel arasındaki Açı Hatası
 
@@ -167,14 +174,29 @@ export class MovementEngine {
 
         // --- YEREL ZAMAN (dtLocal) ---
         // Paketlerin istemciye gerçekte ne aralıkla geldiğini ölçer.
-        // Ağın ritmini (Ortalama_Paket_Suresi) hesaplamak ve
-        // pause→resume tespiti (dtLocal > 3s) için kullanılır.
+        // Zaman Çarpanı hesabı ve pause→resume tespiti (dtLocal > 3s) için kullanılır.
         let dtLocal = 0;
         if (this.Paket_Sayisi > 0) {
             dtLocal = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
-            // Aşırı uçları kırparak (50ms - 2sn arası) ağın ortalama hızını buluyoruz
-            const clampedDt = Math.max(0.05, Math.min(dtLocal, 2.0));
-            this.Ortalama_Paket_Suresi = this.Ortalama_Paket_Suresi * 0.8 + clampedDt * 0.2;
+
+            // OPS: SUNUCU zamanındaki paket aralığı (oynatma hızından bağımsız)
+            // dtPacket her zaman simülasyon zamanıdır, 1x/8x/0.5x fark etmez.
+            const clampedDtServer = Math.max(0.05, Math.min(dtPacket, 2.0));
+            this.Ortalama_Paket_Suresi = this.Ortalama_Paket_Suresi * 0.8 + clampedDtServer * 0.2;
+
+            // ZAMAN ÇARPANI: Simülasyon zamanı / Gerçek zaman
+            // dtPacket = 0.2s (sunucu), dtLocal = 0.025s (8x hız) → çarpan = 8.0
+            // dtPacket = 0.2s (sunucu), dtLocal = 0.4s (0.5x hız) → çarpan = 0.5
+            if (dtLocal > 0.005) {
+                const rawRatio = dtPacket / dtLocal;
+                const clampedRatio = Math.max(0.1, Math.min(rawRatio, 32.0));
+                // İlk paketlerde direkt set et (EMA yakınsamasını bekleme)
+                if (this.Paket_Sayisi <= 2) {
+                    this.Zaman_Carpani = clampedRatio;
+                } else {
+                    this.Zaman_Carpani = this.Zaman_Carpani * 0.8 + clampedRatio * 0.2;
+                }
+            }
         }
 
         // Zamanları güncelle (buradan sonra render döngüsü yeni değerleri kullanır)
@@ -401,39 +423,44 @@ export class MovementEngine {
 
         const localNow = performance.now();
 
-        // --- TEK dt: Hem ekstrapolasyon hem sönümleme için ---
-        // Son geçerli paketten bu yana geçen yerel süre (saniye)
-        // Offset yok — doğrudan yerel kronometre.
-        let dtSincePacket = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
+        // --- İKİ ZAMANLI dt MİMARİSİ ---
+        // realDt : Gerçek zaman (performance.now bazlı) — sönümleme (görsel yumuşatma) için
+        // simDt  : Simülasyon zamanı (realDt × Zaman_Carpani) — ekstrapolasyon (fizik tahmini) için
+        //
+        // 8x oynatmada realDt=0.025s iken simDt=0.2s olur → ekstrapolasyon doğru miktarda ilerler.
+        // 0.5x oynatmada realDt=0.4s iken simDt=0.2s olur → fazla ilerleme engellenir.
+        let realDt = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
+        if (realDt < 0) realDt = 0;
 
-        // Güvenlik
-        if (dtSincePacket < 0) dtSincePacket = 0;
-        if (dtSincePacket > this.MAKS_TAHMIN_SURESI) {
-            // 3 saniyeden uzun süredir veri yok → görsel konumu dondur
+        // Simülasyon zamanına çevir (ekstrapolasyon için)
+        const simDt = realDt * this.Zaman_Carpani;
+
+        // Timeout: Simülasyon zamanında 3 saniyeden fazla veri yoksa → dondur
+        if (simDt > this.MAKS_TAHMIN_SURESI) {
             return Cesium.Cartesian3.clone(this.Guncel_Gorsel_Konum, result);
         }
 
         // ═══════════════════════════════════════════════════════════════
         //  1. EKSTRAPOLASYON (Kusursuz Hayalet Hedefi Hesapla)
-        //  (Orijinal kodla BİREBİR AYNI — değişiklik yok)
+        //  simDt kullanılır — fizik hızları simülasyon zamanındadır.
         // ═══════════════════════════════════════════════════════════════
 
         const targetPos = Cesium.Cartesian3.clone(this.Son_Gercek_Konum, MovementEngine._sTargetPos);
 
-        if (dtSincePacket > 0 && this.Yatay_Hiz > 1.0 && this.Paket_Sayisi >= 2) {
+        if (simDt > 0 && this.Yatay_Hiz > 1.0 && this.Paket_Sayisi >= 2) {
 
             const moveEnu = MovementEngine._sMoveEnu;
 
             // Eğer dönüş hızı çok küçükse (düz uçuş), sıfıra bölme hatasını önlemek için klasik doğrusal (kiriş) formül
             if (Math.abs(this.Rota_Donus_Hizi) < 0.001) {
-                const predictedTrack = this.Rota_Acisi + (this.Rota_Donus_Hizi * dtSincePacket);
-                moveEnu.x = Math.sin(predictedTrack) * this.Yatay_Hiz * dtSincePacket; // East
-                moveEnu.y = Math.cos(predictedTrack) * this.Yatay_Hiz * dtSincePacket; // North
+                const predictedTrack = this.Rota_Acisi + (this.Rota_Donus_Hizi * simDt);
+                moveEnu.x = Math.sin(predictedTrack) * this.Yatay_Hiz * simDt; // East
+                moveEnu.y = Math.cos(predictedTrack) * this.Yatay_Hiz * simDt; // North
             }
             // Eğer uçak virajdaysa YAY İNTEGRALİ (CTRV - Sabit Dönüş Hızı ve Hız Modeli)
             else {
                 const theta0 = this.Rota_Acisi;
-                const theta1 = theta0 + (this.Rota_Donus_Hizi * dtSincePacket);
+                const theta1 = theta0 + (this.Rota_Donus_Hizi * simDt);
                 const R = this.Yatay_Hiz / this.Rota_Donus_Hizi; // Dönüş Yarıçapı (V / w)
 
                 // Vx=Sin integrali -Cos. Vy=Cos integrali Sin.
@@ -442,7 +469,7 @@ export class MovementEngine {
             }
 
             // DİKEY TAHMİN
-            moveEnu.z = this.Dikey_Hiz * dtSincePacket;
+            moveEnu.z = this.Dikey_Hiz * simDt;
 
             // ENU → ECEF dönüşüm matrisi
             Cesium.Transforms.eastNorthUpToFixedFrame(this.Son_Gercek_Konum, Cesium.Ellipsoid.WGS84, MovementEngine._sEnuMatrix);
@@ -454,18 +481,11 @@ export class MovementEngine {
         //  2. HATA VEKTÖRÜNÜ ERİT (ERROR BLENDING) — ÇÖZÜM A İLE
         // ═══════════════════════════════════════════════════════════════
         //
-        // Sönümleme hızı (decayRate) iki üst sınırla kontrol edilir:
-        //
-        // normalRate = sonumleme_carpani / Ortalama_Paket_Suresi
-        //   → Ağın ritmine göre standart erime hızı
-        //
-        // maxRate = Yatay_Hiz / |hata|
-        //   → Geri çekilme önleyici: hata eritme ASLA ekstrapolasyondan hızlı olamaz.
-        //   → Matematiksel garanti: d(görsel)/dt ≥ 0 (her zaman ileri veya sabit)
-        //
-        // minRate = 0.5
-        //   → Duran araçta bile hata yavaşça erisin (4 saniyede %87).
-        //   → Hız=0 iken maxRate=0 olur, minRate bu durumu kurtarır.
+        // Sönümleme realDt kullanır (görsel yumuşatma gerçek zamanda olmalı).
+        // normalRate, Ortalama_Paket_Suresi (sunucu zamanı) ile hesaplanır.
+        // maxRate, görsel hızı (Yatay_Hiz × Zaman_Carpani) kullanır:
+        //   Ekran üzerindeki hız = sim_hız × oynatma_çarpanı
+        //   Geri çekilmeme garantisi bu görsel hıza göre yapılır.
 
         const pozisyon_hatasi_buyukluk = Cesium.Cartesian3.magnitude(this.Konum_Hatasi);
         let sonumleme_carpani = 3.0;
@@ -480,14 +500,16 @@ export class MovementEngine {
         const safeBlendDuration = this.Ortalama_Paket_Suresi;
         const normalRate = sonumleme_carpani / safeBlendDuration;
 
-        // ÇÖZÜM A: Geri çekilme önleyici — hata eritme hızını sınırla
-        // rate ≤ hız / |hata| olduğunda, t=0'da d(görsel)/dt = hız - hata×rate ≥ 0
-        const maxRate = this.Yatay_Hiz / Math.max(pozisyon_hatasi_buyukluk, 0.01);
+        // ÇÖZÜM A: Geri çekilme önleyici — görsel hız ile sınırla
+        // Ekrandaki görsel hız = sim_hız × oynatma_çarpanı
+        const gorsel_hiz = this.Yatay_Hiz * this.Zaman_Carpani;
+        const maxRate = gorsel_hiz / Math.max(pozisyon_hatasi_buyukluk, 0.01);
 
         // Minimum erime hızı: duran araçta bile hata erisin (hız=0 → maxRate=0 olur)
         const Sonumleme_Hizi = Math.max(0.5, Math.min(normalRate, maxRate));
 
-        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * dtSincePacket);
+        // Sönümleme realDt ile — gerçek zamanda görsel yumuşatma
+        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * realDt);
         // Paketler arası süre çok azsa bile biraz sönümle ki titremesin
         if (Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
 
@@ -507,19 +529,20 @@ export class MovementEngine {
 
         const localNow = performance.now();
 
-        // --- TEK dt: Ekstrapolasyon ve sönümleme aynı yerel kronometre ---
-        // Offset yok — doğrudan yerel süre ölçümü
-        let dtSincePacket = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
-        if (dtSincePacket < 0) dtSincePacket = 0;
-        if (dtSincePacket > this.MAKS_TAHMIN_SURESI) {
-            // 3 saniyeden uzun süredir veri yok → görsel yönelimi dondur
+        // --- İKİ ZAMANLI dt MİMARİSİ (konum ile aynı mantık) ---
+        let realDt = (localNow - this.Son_Paket_Yerel_Zamanı) / 1000.0;
+        if (realDt < 0) realDt = 0;
+        const simDt = realDt * this.Zaman_Carpani;
+
+        if (simDt > this.MAKS_TAHMIN_SURESI) {
+            // Simülasyon zamanında 3s → yönelimi dondur
             return Cesium.Quaternion.clone(this.Guncel_Gorsel_Yonelim, result);
         }
 
-        // Heading'i turnRate ile tahmin et
-        const predictedHeading = this.Son_Pruva_Acisi + (this.Pruva_Donus_Hizi * dtSincePacket);
-        const predictedPitch = this.Yunuslama_Acisi + (this.Yunuslama_Hizi * dtSincePacket);
-        const predictedRoll = this.Yatis_Acisi + (this.Yatis_Hizi * dtSincePacket);
+        // Heading'i turnRate ile tahmin et (simDt — simülasyon zamanı)
+        const predictedHeading = this.Son_Pruva_Acisi + (this.Pruva_Donus_Hizi * simDt);
+        const predictedPitch = this.Yunuslama_Acisi + (this.Yunuslama_Hizi * simDt);
+        const predictedRoll = this.Yatis_Acisi + (this.Yatis_Hizi * simDt);
 
         MovementEngine._sHpr.heading = predictedHeading;
         MovementEngine._sHpr.pitch = predictedPitch;
@@ -533,7 +556,7 @@ export class MovementEngine {
         );
 
         // HATA VEKTÖRÜNÜ ERİT (ERROR BLENDING) — ÇÖZÜM A İLE
-        // Aynı dt kullanılır (tek saat mimarisi)
+        // Sönümleme realDt kullanır, maxRate görsel açısal hız ile
         //
         // Açısal hata büyüklüğünü quaternion dot product ile hesapla (radyan cinsinden)
         // Yonelim_Hatasi, IDENTITY'ye yakınsa hata küçük, uzaksa büyük.
@@ -551,20 +574,21 @@ export class MovementEngine {
         const safeBlendDuration = Math.max(this.Ortalama_Paket_Suresi, 0.2);
         const normalRate_ori = sonumleme_carpani / safeBlendDuration;
 
-        // ÇÖZÜM A (Yönelim): Ters dönüş önleyici
-        // Açısal "hız" olarak 3 eksendeki en büyük dönüş hızını kullan
-        // rate ≤ açısal_hız / açısal_hata → eritme asla dönüşten hızlı olamaz
+        // ÇÖZÜM A (Yönelim): Ters dönüş önleyici — görsel açısal hız ile sınırla
         const acisal_hiz = Math.max(
             Math.abs(this.Pruva_Donus_Hizi),
             Math.abs(this.Yunuslama_Hizi),
             Math.abs(this.Yatis_Hizi)
         );
-        const maxRate_ori = acisal_hiz / Math.max(acısal_hata_radyan, 0.001);
+        // Görsel açısal hız = sim açısal hız × oynatma çarpanı
+        const gorsel_acisal_hiz = acisal_hiz * this.Zaman_Carpani;
+        const maxRate_ori = gorsel_acisal_hiz / Math.max(acısal_hata_radyan, 0.001);
 
         // Minimum 0.5: duran/düz uçan araçta bile açısal hata yavaşça erisin
         const Sonumleme_Hizi = Math.max(0.5, Math.min(normalRate_ori, maxRate_ori));
 
-        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * dtSincePacket);
+        // Sönümleme realDt ile — gerçek zamanda görsel yumuşatma
+        let Sonumleme_Katsayisi = Math.exp(-Sonumleme_Hizi * realDt);
         // Paketler arası süre çok azsa bile biraz sönümle ki titremesin
         if (Sonumleme_Katsayisi > 0.99) Sonumleme_Katsayisi = 0.99;
 
@@ -612,6 +636,7 @@ export class MovementEngine {
         this.Son_Pruva_Acisi = h;
         this.Yunuslama_Acisi = p;
         this.Yatis_Acisi = r;
+        this.Zaman_Carpani = 1.0; // Oynatma hızı oranını sıfırla
 
         // 3. ZAMANLARI SET ET
         // forceSync bir "sıfırdan başlama" operasyonudur. Zamanların burada
