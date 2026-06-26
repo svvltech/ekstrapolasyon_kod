@@ -187,13 +187,16 @@ export class MovementEngine {
             // ZAMAN ÇARPANI: Simülasyon zamanı / Gerçek zaman
             // dtPacket = 0.2s (sunucu), dtLocal = 0.025s (8x hız) → çarpan = 8.0
             // dtPacket = 0.2s (sunucu), dtLocal = 0.4s (0.5x hız) → çarpan = 0.5
+            // 0.005 = "paketler arasında en az 5ms geçmeli"
             if (dtLocal > 0.005) {
                 const rawRatio = dtPacket / dtLocal;
+                // 0.1 ve 32.0 = "simülasyon çarpanı en fazla 0.1 ile 32 arasında olmalı"
                 const clampedRatio = Math.max(0.1, Math.min(rawRatio, 32.0));
                 // İlk paketlerde direkt set et (EMA yakınsamasını bekleme)
                 if (this.Paket_Sayisi <= 2) {
                     this.Zaman_Carpani = clampedRatio;
                 } else {
+                    // Yaklaşık 5 pakette yeni değere yakınsar.
                     this.Zaman_Carpani = this.Zaman_Carpani * 0.8 + clampedRatio * 0.2;
                 }
             }
